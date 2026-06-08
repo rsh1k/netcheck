@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+.venv/
+venv/
+
+# NetCheck runtime artifacts (never commit evidence/secrets/reports)
+netcheck.toml
+netcheck.json
+*.report.md
+audit.jsonl
+evidence-*/
+ev/
+ir/
+
+# Local env / secrets
+.env

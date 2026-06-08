@@ -1,0 +1,49 @@
+# NetCheck configuration (example)
+# Copy to netcheck.toml and edit. Safe to commit: NO secrets live here.
+# API keys are read ONLY from environment variables (see README).
+# Requires Python 3.11+ for TOML, or use a .json file instead (any version).
+
+# Default target for port / HTTP / TLS / security checks.
+target = "cloudflare.com"
+
+# Ports probed in triage mode.
+ports = [80, 443, 22, 53]
+
+# Per-connection timeout (seconds).
+timeout = 3.0
+
+# Run deep checks (traceroute, MTU black-hole, IPv6) by default.
+full = false
+
+# Operator name recorded in reports / audit logs / evidence manifests.
+operator = "netops"
+
+# Append a JSON-lines audit record on every run (good for SIEM ingestion).
+log_file = "/var/log/netcheck/audit.jsonl"
+
+[ai]
+# Turn AI analysis on by default.
+enabled = false
+# provider: anthropic | openai | azure | ollama
+provider = "ollama"
+# Leave model empty to use the provider's sensible default, or pin one:
+#   anthropic -> claude-sonnet-4-6  (or claude-opus-4-8 for deepest analysis)
+#   openai    -> gpt-5.4-mini       (or gpt-5.5)
+#   ollama    -> llama3.1           (must be pulled locally)
+model = ""
+# Endpoint override for self-hosted / proxied / OpenAI-compatible servers.
+base_url = ""
+# Azure only:
+deployment = ""
+api_version = "2024-10-21"
+max_tokens = 1500
+timeout = 60.0
+# Redact internal IPs / hostnames / MACs before sending to CLOUD providers.
+# Ignored for Ollama (local). Keep true unless you have a reason not to.
+redact = true
+
+[notify]
+# Generic JSON webhook (also Slack/Teams/Mattermost compatible). Leave empty to disable.
+webhook_url = ""
+# Minimum verdict that triggers a notification: WARN or FAIL.
+on_severity = "WARN"
