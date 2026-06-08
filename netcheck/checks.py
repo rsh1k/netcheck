@@ -134,7 +134,7 @@ def check_gateway(env: dict) -> CheckResult:
         return CheckResult("Gateway reachability", WARN,
                            "could not determine a default gateway", {"gateway": None})
 
-    st = ping(gw, count=2)
+    st = ping(gw, count=1, timeout_per=1.0)
     data = {"gateway": gw, "loss_pct": st.loss_pct, "rtt_avg_ms": st.rtt_avg_ms,
             "icmp_reachable": st.reachable, "platform": plat}
 
@@ -304,7 +304,7 @@ def check_ports(cfg: AppConfig) -> CheckResult:
     return CheckResult(name, OK, summary, data)
 
 
-def check_http_captive(cfg: AppConfig) -> CheckResult:
+def check_http_captive(cfg: AppConfig, env: dict = None) -> CheckResult:
     def probe(item):
         url, exp_status, exp_body = item
         status, body, err = http_probe(url, timeout=cfg.timeout)
@@ -316,10 +316,20 @@ def check_http_captive(cfg: AppConfig) -> CheckResult:
         probes = list(ex.map(probe, CAPTIVE_PROBES))
     any_ok = any(p["matched"] for p in probes)
     captive = any(p["intercepted"] for p in probes)
-    data = {"probes": probes, "captive_portal": captive and not any_ok, "internet_open": any_ok}
+    virtual = bool((env or {}).get("virt", {}).get("virtual"))
+    data = {"probes": probes, "captive_portal": captive and not any_ok,
+            "internet_open": any_ok, "virtual": virtual}
     if any_ok and not captive:
         return CheckResult("HTTP / captive portal", OK, "open internet confirmed (probes passed)", data)
     if captive:
+        # In a VM/WSL/container the probes are often rewritten by the virtual
+        # network layer; if real internet works that's not a captive portal.
+        if virtual and (any_ok or _upstream_reachable()):
+            return CheckResult("HTTP / captive portal", INFO,
+                               "probes altered by the virtual network layer (not a real captive portal)", data)
+        if any_ok:
+            return CheckResult("HTTP / captive portal", INFO,
+                               "some probes intercepted but internet is reachable", data)
         return CheckResult("HTTP / captive portal", WARN,
                            "Captive portal detected - a login/splash page is intercepting traffic.", data)
     return CheckResult("HTTP / captive portal", FAIL,
@@ -469,7 +479,7 @@ def run_diagnostics(cfg: AppConfig, env: dict, emit=None):
     step(check_vpn, env)
     step(check_role, env)
     step(check_ports, cfg)
-    step(check_http_captive, cfg)
+    step(check_http_captive, cfg, env)
     step(check_tls, cfg)
     step(lambda c: check_quality(inet), cfg)
 

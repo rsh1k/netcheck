@@ -220,10 +220,13 @@ class PingStats:
 
 
 def ping(host: str, count: int = 4, timeout_per: float = 2.0) -> PingStats:
+    deadline = max(1, int(round(count * timeout_per)))
     if OSNAME == "Windows":
         cmd = ["ping", "-n", str(count), "-w", str(int(timeout_per * 1000)), host]
-    else:
-        cmd = ["ping", "-c", str(count), host]
+    elif OSNAME == "Darwin":
+        cmd = ["ping", "-c", str(count), "-t", str(deadline), host]
+    else:  # Linux: -w sets an overall deadline so a silent host fails fast
+        cmd = ["ping", "-c", str(count), "-w", str(deadline), host]
     rc, out = run_cmd(cmd, timeout=count * timeout_per + 5)
     st = PingStats(raw=out)
 
