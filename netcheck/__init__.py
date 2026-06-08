@@ -6,5 +6,5 @@ Standard-library only at runtime (AI calls use urllib, no SDKs) so it runs in
 locked-down and air-gapped environments.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 __all__ = ["__version__"]

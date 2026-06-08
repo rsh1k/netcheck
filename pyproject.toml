@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netcheck-ir"
-version = "2.0.1"
+dynamic = ["version"]
 description = "Enterprise network triage, security posture, and IR/forensics in one command - with optional AI analysis (Claude / OpenAI / Azure / Ollama)."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -38,3 +38,6 @@ netcheck = "netcheck.cli:main"
 
 [tool.setuptools]
 packages = ["netcheck"]
+
+[tool.setuptools.dynamic]
+version = { attr = "netcheck.__version__" }
