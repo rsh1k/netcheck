@@ -14,7 +14,21 @@ from .core import worst_severity, VERDICT_BY_SEVERITY, SEVERITY
 
 
 def verdict(results) -> str:
+    """Canonical severity verdict (operational wording)."""
     return VERDICT_BY_SEVERITY[worst_severity(results)]
+
+
+# Mode-specific wording for the same underlying severity (0/1/2).
+_VERDICT_LABELS = {
+    "security": {0: "SECURE", 1: "AT RISK", 2: "CRITICAL"},
+    "incident": {0: "STABLE", 1: "ELEVATED", 2: "CRITICAL"},
+}
+
+
+def verdict_label(results, mode: str = "triage") -> str:
+    """Human verdict phrased for the mode (security/incident vs operational)."""
+    sev = worst_severity(results)
+    return _VERDICT_LABELS.get(mode, VERDICT_BY_SEVERITY)[sev]
 
 
 def build_document(env, results, findings, ai_result=None, mode="triage") -> dict:
@@ -23,6 +37,7 @@ def build_document(env, results, findings, ai_result=None, mode="triage") -> dic
         "schema": "netcheck-report-2",
         "mode": mode,
         "verdict": verdict(results),
+        "verdict_label": verdict_label(results, mode),
         "environment": env,
         "checks": [r.to_dict() for r in results],
         "findings": findings,
@@ -38,7 +53,7 @@ def write_json(path, env, results, findings, ai_result=None, mode="triage"):
 
 
 def write_markdown(path, env, results, findings, ai_result=None, mode="triage"):
-    v = verdict(results)
+    v = verdict_label(results, mode)
     L = []
     L.append(f"# NetCheck Report ({mode})\n")
     L.append(f"**Verdict:** `{v}`  ")
@@ -114,6 +129,7 @@ def append_audit_log(path, env, results, findings, mode="triage"):
         "host": env.get("hostname"),
         "target": env.get("target"),
         "verdict": verdict(results),
+        "verdict_label": verdict_label(results, mode),
         "summary": {r.name: r.status for r in results},
         "top_finding": findings[0] if findings else None,
     }

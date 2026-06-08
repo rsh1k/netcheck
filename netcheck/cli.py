@@ -76,15 +76,18 @@ class Dashboard:
         print("  " + self.style.bold(self.style.cyan(title)))
         print()
 
-    def summary(self, results, findings):
+    def summary(self, results, findings, mode="triage"):
         if self.quiet:
             return
         s = self.style
-        v = report.verdict(results)
-        color = {"HEALTHY": s.green, "DEGRADED": s.yellow, "DOWN": s.red}[v]
+        sev = worst_severity(results)
+        label = report.verdict_label(results, mode)
+        color = {0: s.green, 1: s.yellow, 2: s.red}[sev]
+        heading = {"security": "SECURITY POSTURE", "incident": "INCIDENT ASSESSMENT",
+                   "collect": "COLLECTION"}.get(mode, "DIAGNOSIS")
         print()
         print(s.grey("  " + "─" * 60))
-        print(f"  {s.bold('DIAGNOSIS')}   verdict: {color(s.bold(v))}")
+        print(f"  {s.bold(heading)}   verdict: {color(s.bold(label))}")
         print(s.grey("  " + "─" * 60))
         for i, f in enumerate(findings, 1):
             head = {OK: s.green, WARN: s.yellow, FAIL: s.red}.get(f["severity"], s.cyan)
@@ -121,7 +124,7 @@ class Dashboard:
 
 def finalize(cfg, dash, env, results, mode):
     findings = diagnose(results, cfg.target, env)
-    dash.summary(results, findings)
+    dash.summary(results, findings, mode)
 
     ai_result = None
     if cfg.ai.enabled:

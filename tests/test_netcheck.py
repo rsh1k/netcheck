@@ -393,6 +393,21 @@ class TestReport(unittest.TestCase):
         self.assertFalse(notify.should_notify("DEGRADED", "FAIL"))
         self.assertTrue(notify.should_notify("DOWN", "FAIL"))
 
+    def test_verdict_labels_mode_aware(self):
+        warn = [CheckResult("a", WARN)]
+        fail = [CheckResult("a", FAIL)]
+        ok = [CheckResult("a", OK)]
+        # operational wording (triage/collect)
+        self.assertEqual(report.verdict_label(fail, "triage"), "DOWN")
+        # security wording
+        self.assertEqual(report.verdict_label(ok, "security"), "SECURE")
+        self.assertEqual(report.verdict_label(warn, "security"), "AT RISK")
+        self.assertEqual(report.verdict_label(fail, "security"), "CRITICAL")
+        # incident wording
+        self.assertEqual(report.verdict_label(warn, "incident"), "ELEVATED")
+        # canonical verdict unchanged
+        self.assertEqual(report.verdict(fail), "DOWN")
+
 
 # --------------------------------------------------------------------------- #
 # Live security checks (skipped automatically if offline)
@@ -413,7 +428,9 @@ class TestSecurityLive(unittest.TestCase):
         self.assertEqual(r.category, "security")
         self.assertIn(r.status, (OK, WARN, FAIL))
         c = security.check_certificate("cloudflare.com", 443, timeout=6)
-        self.assertEqual(c.status, OK)
+        # OK (valid) or WARN (valid but near expiry) are both correct outcomes;
+        # only a verification failure would be wrong here.
+        self.assertIn(c.status, (OK, WARN))
         self.assertIsNotNone(c.data.get("days_to_expiry"))
 
     def test_exposed_services_clean(self):
