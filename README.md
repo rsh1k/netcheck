@@ -65,7 +65,7 @@ Most "network test" tools answer *what* (ping failed) but not *why*. NetCheck en
 
 ```bash
 # from source
-git clone https://github.com/your-username/netcheck.git
+git clone https://github.com/rsh1k/netcheck.git
 cd netcheck
 pip install .
 
