@@ -19,6 +19,18 @@ from datetime import datetime, timezone
 from .core import CheckResult, OK, WARN, FAIL, INFO, SKIP, tcp_connect, http_probe
 from .config import RISKY_PORTS, PORT_NAMES
 
+# NIST publications referenced by these checks (for enterprise/compliance mapping).
+NIST = {
+    "tls": "NIST SP 800-52 Rev. 2 (TLS)",
+    "cert": "NIST SP 800-52 Rev. 2 (TLS)",
+    "headers": "OWASP Secure Headers / NIST SP 800-53 SC-8",
+    "exposed": "NIST SP 800-41 Rev. 1 (firewalls/DMZ), SP 800-207 (Zero Trust)",
+    "ssh": "NISTIR 7966 (SSH), NIST SP 800-52 Rev. 2 (crypto)",
+    "waf": "NIST SP 800-41 Rev. 1, SP 800-44 (public web servers)",
+    "imds": "NIST SP 800-53 SC-7 (boundary protection), AC-6 (least privilege)",
+    "cloud": "NIST SP 800-145 (cloud service models)",
+}
+
 # Security headers OWASP recommends, with why-they-matter notes.
 SECURITY_HEADERS = {
     "strict-transport-security": "HSTS - forces HTTPS, prevents SSL-strip",
@@ -215,11 +227,234 @@ def check_exposed_services(host: str, timeout: float = 3.0) -> CheckResult:
     return CheckResult(name, sev, f"reachable risky ports: {desc}", data, category="security")
 
 
-def run_security_assessment(target: str, timeout: float = 5.0):
-    """Run the full defensive posture assessment against a single target."""
-    return [
+def run_security_assessment(target: str, timeout: float = 5.0, deep: bool = True):
+    """Run the full defensive posture assessment against a single target.
+    `deep` adds the SSH algorithm audit and WAF fingerprint."""
+    results = [
         check_tls_protocols(target, 443, timeout),
         check_certificate(target, 443, timeout),
         check_security_headers(target, timeout),
         check_exposed_services(target, min(timeout, 3.0)),
     ]
+    if deep:
+        results.append(check_waf(target, timeout))
+        results.append(check_ssh(target, 22, timeout))
+    # Tag NIST references for compliance reporting.
+    for r in results:
+        key = ("tls" if "TLS protocol" in r.name else
+               "cert" if "Certificate" in r.name else
+               "headers" if "headers" in r.name else
+               "exposed" if "Exposed" in r.name else
+               "waf" if "WAF" in r.name else
+               "ssh" if "SSH" in r.name else "")
+        if key:
+            r.data["nist"] = NIST[key]
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# SSH algorithm hygiene (read-only KEXINIT handshake - no authentication)
+# --------------------------------------------------------------------------- #
+
+_SSH_WEAK_KEX = ("group1-sha1", "group14-sha1", "group-exchange-sha1",
+                 "gss-group1", "gss-group14", "rsa1024-sha1", "diffie-hellman-group1")
+_SSH_WEAK_HOSTKEY = ("ssh-dss", "ssh-rsa")  # ssh-rsa = SHA-1 signature (deprecated)
+_SSH_WEAK_CIPHER = ("arcfour", "-cbc", "3des", "blowfish", "cast128", "des-", "none")
+_SSH_WEAK_MAC = ("hmac-md5", "hmac-sha1", "umac-64")
+
+
+class _Buf:
+    def __init__(self, sock):
+        self.s = sock
+        self.buf = b""
+
+    def _fill(self):
+        chunk = self.s.recv(4096)
+        if not chunk:
+            raise EOFError("connection closed")
+        self.buf += chunk
+
+    def read_line(self, limit=8192):
+        while b"\n" not in self.buf:
+            if len(self.buf) > limit:
+                raise ValueError("line too long")
+            self._fill()
+        line, self.buf = self.buf.split(b"\n", 1)
+        return line + b"\n"
+
+    def read_exact(self, n):
+        while len(self.buf) < n:
+            self._fill()
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+
+def _ssh_namelists(payload):
+    """Parse the 10 name-lists from an SSH_MSG_KEXINIT payload (after cookie)."""
+    import struct
+    idx = 17  # 1 byte msg type + 16 byte cookie
+    lists = []
+    for _ in range(10):
+        if idx + 4 > len(payload):
+            break
+        (ln,) = struct.unpack(">I", payload[idx:idx + 4])
+        idx += 4
+        lists.append(payload[idx:idx + ln].decode("ascii", "replace"))
+        idx += ln
+    return lists
+
+
+def ssh_audit(host: str, port: int = 22, timeout: float = 6.0) -> dict:
+    import socket as _socket
+    import struct
+    out = {"reachable": False, "banner": "", "software": "", "kex": [], "host_keys": [],
+           "ciphers": [], "macs": [], "weak": [], "error": ""}
+    try:
+        s = _socket.create_connection((host, port), timeout=timeout)
+        s.settimeout(timeout)
+    except Exception as e:
+        out["error"] = type(e).__name__
+        return out
+    try:
+        buf = _Buf(s)
+        # Server identification string (skip any pre-banner lines).
+        banner = ""
+        for _ in range(10):
+            line = buf.read_line().decode("latin-1", "replace").strip()
+            if line.startswith("SSH-"):
+                banner = line
+                break
+        out["reachable"] = True
+        out["banner"] = banner
+        out["software"] = banner.split("-", 2)[-1] if banner.count("-") >= 2 else banner
+        s.sendall(b"SSH-2.0-NetCheck\r\n")
+        # Read the server's KEXINIT binary packet.
+        for _ in range(5):
+            length = struct.unpack(">I", buf.read_exact(4))[0]
+            if length <= 0 or length > 35000:
+                break
+            body = buf.read_exact(length)
+            pad = body[0]
+            payload = body[1:len(body) - pad]
+            if payload and payload[0] == 20:  # SSH_MSG_KEXINIT
+                nl = _ssh_namelists(payload)
+                if len(nl) >= 4:
+                    out["kex"] = [a for a in nl[0].split(",") if a]
+                    out["host_keys"] = [a for a in nl[1].split(",") if a]
+                    out["ciphers"] = [a for a in nl[2].split(",") if a]
+                    out["macs"] = [a for a in nl[4].split(",") if a]
+                break
+    except Exception as e:
+        out["error"] = out["error"] or type(e).__name__
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+    weak = []
+    for a in out["kex"]:
+        if any(w in a for w in _SSH_WEAK_KEX):
+            weak.append("kex:" + a)
+    for a in out["host_keys"]:
+        if a in _SSH_WEAK_HOSTKEY:
+            weak.append("hostkey:" + a)
+    for a in out["ciphers"]:
+        if any(w in a for w in _SSH_WEAK_CIPHER):
+            weak.append("cipher:" + a)
+    for a in out["macs"]:
+        if any(w in a for w in _SSH_WEAK_MAC):
+            weak.append("mac:" + a)
+    out["weak"] = weak
+    return out
+
+
+def check_ssh(host: str, port: int = 22, timeout: float = 6.0) -> CheckResult:
+    name = f"SSH posture → {host}:{port}"
+    info = ssh_audit(host, port, timeout)
+    if not info["reachable"]:
+        return CheckResult(name, SKIP, f"no SSH service reachable ({info.get('error') or 'closed'})",
+                           info, category="security")
+    sw = info.get("software", "")
+    if info["weak"]:
+        return CheckResult(name, WARN,
+                           f"{sw or 'SSH'} offers weak algorithms: {', '.join(info['weak'][:6])}"
+                           + ("…" if len(info["weak"]) > 6 else ""), info, category="security")
+    if not info["kex"]:
+        return CheckResult(name, INFO, f"SSH present ({sw})  — could not enumerate algorithms", info, category="security")
+    return CheckResult(name, OK, f"{sw or 'SSH'} — modern algorithms only", info, category="security")
+
+
+# --------------------------------------------------------------------------- #
+# WAF / CDN fingerprint (passive - reads response headers from one request)
+# --------------------------------------------------------------------------- #
+
+# (header-or-cookie substring, vendor). Matched case-insensitively.
+_WAF_SIGNS = [
+    ("cf-ray", "Cloudflare"), ("__cfduid", "Cloudflare"), ("cf-cache-status", "Cloudflare"),
+    ("x-sucuri-id", "Sucuri CloudProxy"), ("x-sucuri-cache", "Sucuri CloudProxy"),
+    ("x-iinfo", "Imperva Incapsula"), ("incap_ses", "Imperva Incapsula"), ("visid_incap", "Imperva Incapsula"),
+    ("akamaighost", "Akamai"), ("x-akamai", "Akamai"),
+    ("x-amz-cf-id", "AWS CloudFront"), ("x-amzn-requestid", "AWS API Gateway/WAF"),
+    ("awselb", "AWS ELB"),
+    ("x-azure-ref", "Azure Front Door"), ("microsoft-azure-application-gateway", "Azure App Gateway"),
+    ("x-served-by", "Fastly/Varnish"), ("fastly", "Fastly"),
+    ("barracuda", "Barracuda"),
+    ("fortiwafsid", "Fortinet FortiWeb"),
+    ("ns_af", "Citrix NetScaler"), ("citrix_ns_id", "Citrix NetScaler"),
+    ("x-wa-info", "F5 BIG-IP ASM"), ("x-cdn", "generic CDN"),
+    ("mod_security", "ModSecurity"), ("modsecurity", "ModSecurity"),
+]
+
+
+def detect_waf(host: str, timeout: float = 5.0) -> dict:
+    status, body, err, headers = http_probe(f"https://{host}/", timeout=timeout, want_headers=True)
+    if status is None:
+        return {"reachable": False, "error": err, "vendors": [], "server": ""}
+    blob = " ".join(f"{k}: {v}" for k, v in headers.items()).lower()
+    server = headers.get("server", "")
+    vendors = []
+    for needle, vendor in _WAF_SIGNS:
+        if needle in blob and vendor not in vendors:
+            vendors.append(vendor)
+    # Server header sometimes names the WAF/CDN directly.
+    for token, vendor in (("cloudflare", "Cloudflare"), ("sucuri", "Sucuri CloudProxy"),
+                          ("akamaighost", "Akamai"), ("cloudfront", "AWS CloudFront"),
+                          ("bigip", "F5 BIG-IP")):
+        if token in server.lower() and vendor not in vendors:
+            vendors.append(vendor)
+    return {"reachable": True, "vendors": vendors, "server": server, "status": status}
+
+
+def check_waf(host: str, timeout: float = 5.0) -> CheckResult:
+    name = f"WAF / CDN → {host}"
+    info = detect_waf(host, timeout)
+    if not info["reachable"]:
+        return CheckResult(name, SKIP, f"no HTTPS response ({info.get('error')})", info, category="security")
+    if info["vendors"]:
+        return CheckResult(name, INFO, f"edge protection detected: {', '.join(info['vendors'])}",
+                           info, category="security")
+    srv = f"  (Server: {info['server']})" if info.get("server") else ""
+    return CheckResult(name, INFO, f"no WAF/CDN signature detected{srv}", info, category="security")
+
+
+# --------------------------------------------------------------------------- #
+# Cloud instance-metadata-service (IMDS) posture
+# --------------------------------------------------------------------------- #
+
+def check_imds(cloud_info: dict) -> CheckResult:
+    name = "Cloud IMDS posture"
+    provider = cloud_info.get("provider")
+    imds = cloud_info.get("imds") or {}
+    data = {"provider": provider, "imds": imds, "nist": NIST["imds"]}
+    if not provider:
+        return CheckResult(name, SKIP, "not running on a detected cloud instance", data, category="security")
+    if provider == "aws":
+        if imds.get("imdsv1_enabled"):
+            return CheckResult(name, WARN,
+                               "IMDSv1 is reachable without a token — SSRF credential-theft risk. "
+                               "Enforce IMDSv2 (HttpTokens=required).", data, category="security")
+        if imds.get("imdsv2"):
+            return CheckResult(name, OK, "IMDSv2 enforced (token required) — good", data, category="security")
+    return CheckResult(name, INFO,
+                       f"{provider.upper()} metadata service present (header-gated)", data, category="security")

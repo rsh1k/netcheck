@@ -44,12 +44,20 @@ class Dashboard:
         print(s.bold(s.cyan("  NetCheck ")) + s.grey(f"v{__version__}  ·  {mode}"))
         print(s.grey("  " + "─" * 60))
         rows = [("host", env.get("hostname")), ("os", env.get("os")),
+                ("platform", env.get("platform")),
                 ("local IPv4", env.get("local_ip") or s.red("none")),
                 ("gateway", env.get("gateway") or s.red("unknown")),
                 ("configured DNS", ", ".join(env.get("dns_servers") or []) or s.red("none")),
                 ("target", env.get("target"))]
         if env.get("operator"):
             rows.append(("operator", env["operator"]))
+        cloud = env.get("cloud") or {}
+        if cloud.get("provider"):
+            cp = (env.get("cloud") or {})
+            label = f"{cp.get('product', cloud['provider'])}"
+            if cp.get("service_model"):
+                label += f"  [{cp['service_model']}]"
+            rows.insert(3, ("cloud", label))
         for k, v in rows:
             print(f"  {s.dim(k):<22} {v}")
         print(s.grey("  " + "─" * 60))
@@ -112,7 +120,7 @@ class Dashboard:
 # --------------------------------------------------------------------------- #
 
 def finalize(cfg, dash, env, results, mode):
-    findings = diagnose(results, cfg.target)
+    findings = diagnose(results, cfg.target, env)
     dash.summary(results, findings)
 
     ai_result = None
@@ -163,6 +171,9 @@ def mode_security(cfg, dash):
         r.duration_ms = 0.0
         results.append(r)
         dash.emit(r)
+    imds = security.check_imds(env.get("cloud") or {})
+    results.append(imds)
+    dash.emit(imds)
     finalize(cfg, dash, env, results, "security")
     return worst_severity(results)
 
@@ -175,6 +186,9 @@ def mode_incident(cfg, dash):
     for r in security.run_security_assessment(cfg.target, timeout=max(cfg.timeout, 5.0)):
         results.append(r)
         dash.emit(r)
+    imds = security.check_imds(env.get("cloud") or {})
+    results.append(imds)
+    dash.emit(imds)
     dash.section("Forensic evidence collection (read-only host state)")
     manifest = forensics.collect_evidence(cfg.evidence_dir, operator=cfg.operator,
                                           case_id=cfg.case_id)
@@ -198,7 +212,7 @@ def mode_collect(cfg, dash):
         dash.emit(r)
     dash.note(f"evidence bundle → {manifest['_bundle_dir']}")
     dash.note(f"bundle sha256: {manifest['bundle_sha256']}")
-    findings = diagnose(fres, cfg.target)
+    findings = diagnose(fres, cfg.target, env)
     ai_result = None
     if cfg.ai.enabled:
         dash.note(f"running AI analysis via {cfg.ai.provider}…")

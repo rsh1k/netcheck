@@ -22,9 +22,13 @@ def _finder(results):
     return find
 
 
-def diagnose(results, target: str) -> list:
+def diagnose(results, target: str, env=None) -> list:
     f = []
     find = _finder(results)
+    env = env or {}
+    virt = (env.get("virt") or {})
+    plat = virt.get("platform", "")
+    virtual = virt.get("virtual", False)
 
     iface = find("Local interface")
     gw = find("Gateway reachability")
@@ -35,6 +39,8 @@ def diagnose(results, target: str) -> list:
     mtu = find("Path MTU")
     ports = find("TCP ports")
     quality = find("Connection quality")
+    nat = find("NAT / egress")
+    proxy = find("Proxy")
 
     def add(sev, title, cause, fix):
         f.append({"severity": sev, "title": title, "cause": cause, "fix": fix})
@@ -79,11 +85,32 @@ def diagnose(results, target: str) -> list:
             "A resolver returned private/bogus IPs for a public domain - typical of captive portals or tampering.",
             "Complete any captive-portal login; otherwise use a trusted resolver (1.1.1.1) and consider DNS-over-HTTPS.")
 
-    # Captive portal
+    # Captive portal — but in virtualized/NAT environments the connectivity
+    # probes are often rewritten by the virtual network layer, not a real portal.
     if http and http.data.get("captive_portal"):
-        add(WARN, "Captive portal is blocking you",
-            "Connectivity probes were intercepted by a login/splash page (hotel/airport/café Wi-Fi).",
-            "Open any http:// site in a browser to trigger the portal, then sign in.")
+        internet_fine = inet and inet.status == OK and (not dns or dns.status == OK)
+        if virtual and internet_fine:
+            add(INFO, "Captive-portal probes intercepted by the virtual network layer",
+                f"Running under {virt.get('pretty', plat)}: the OS connectivity probes were altered by the "
+                "NAT/DNS shim, but raw internet and DNS both work — this is not a real captive portal.",
+                "No action needed. If a real portal is suspected, open any http:// site in a browser to check.")
+        else:
+            add(WARN, "Captive portal is blocking you",
+                "Connectivity probes were intercepted by a login/splash page (hotel/airport/café Wi-Fi).",
+                "Open any http:// site in a browser to trigger the portal, then sign in.")
+
+    # Carrier-grade NAT
+    if nat and nat.status == WARN and nat.data.get("type") == "carrier-grade NAT (CGNAT)":
+        add(WARN, "Carrier-grade NAT (CGNAT) detected",
+            nat.data.get("note", "Your ISP is double-NATing you."),
+            "For inbound access (hosting, port-forward, P2P) request a public IP from your ISP, or use a relay/VPN/tunnel.")
+
+    # Proxy in path
+    if proxy and proxy.status == WARN:
+        add(WARN, "HTTP(S) proxy is set in the environment",
+            "A proxy is configured via environment variables; it can rewrite requests and re-sign TLS, "
+            "which explains unexpected certificate issuers or blocked endpoints.",
+            "If traffic misbehaves, unset http_proxy/https_proxy or confirm the proxy and its CA are correct.")
 
     # Clock skew
     if tls and tls.data.get("clock_skew"):

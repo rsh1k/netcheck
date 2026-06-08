@@ -1,8 +1,8 @@
 # NetCheck Report (security)
 
 **Verdict:** `DEGRADED`  
-**Generated:** 2026-06-08T06:36:59.150649+00:00  
-**Host:** vm  ·  **OS:** Linux 6.18.5  ·  **Target:** cloudflare.com
+**Generated:** 2026-06-08T12:24:47.568687+00:00  
+**Host:** vm  ·  **OS:** Linux 6.18.5  ·  **Target:** github.com
 
 ## Environment
 
@@ -17,16 +17,21 @@
 
 | Status | Check | Detail | Time |
 |---|---|---|---|
-| `OK` | TLS protocol audit → cloudflare.com | modern only (max TLS 1.3)  cipher TLS_AES_256_GCM_SHA384 | 0ms |
-| `OK` | Certificate hygiene → cloudflare.com | valid, 30 days left  issuer Anthropic | 0ms |
-| `WARN` | HTTP security headers → cloudflare.com | missing: CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy | 0ms |
-| `OK` | Exposed services → cloudflare.com | no risky/management ports reachable | 0ms |
+| `OK` | TLS protocol audit → github.com | modern only (max TLS 1.3)  cipher TLS_AES_256_GCM_SHA384 | 0ms |
+| `WARN` | Certificate hygiene → github.com | certificate expires in 26 days | 0ms |
+| `OK` | HTTP security headers → github.com | all key security headers present | 0ms |
+| `OK` | Exposed services → github.com | no risky/management ports reachable | 0ms |
+| `INFO` | WAF / CDN → github.com | no WAF/CDN signature detected  (Server: github.com) | 0ms |
+| `SKIP` | SSH posture → github.com:22 | no SSH service reachable (TimeoutError) | 0ms |
+| `SKIP` | Cloud IMDS posture | not running on a detected cloud instance | 0ms |
+
+**NIST mapping:** NIST SP 800-52 Rev. 2 (TLS); OWASP Secure Headers / NIST SP 800-53 SC-8; NIST SP 800-41 Rev. 1 (firewalls/DMZ), SP 800-207 (Zero Trust); NIST SP 800-41 Rev. 1, SP 800-44 (public web servers); NISTIR 7966 (SSH), NIST SP 800-52 Rev. 2 (crypto); NIST SP 800-53 SC-7 (boundary protection), AC-6 (least privilege)
 
 ## Diagnosis (rule-based)
 
-### 1. [WARN] Security: HTTP security headers
+### 1. [WARN] Security: Certificate hygiene
 
-- **Why:** missing: CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy
+- **Why:** certificate expires in 26 days
 - **Fix:** Review the security section; remediate per the detail above.
 
 ---

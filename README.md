@@ -5,9 +5,53 @@
 NetCheck runs the full network-troubleshooting workflow (interface → gateway → internet → DNS → ports → HTTP/captive-portal → TLS → quality, plus optional traceroute/MTU/IPv6), then **diagnoses the root cause** instead of just dumping raw output. On top of that it adds a defensive **security-posture assessment**, read-only **DFIR evidence collection**, and an **incident-response snapshot** mode — each of which can be enriched with **AI analysis** from Claude, OpenAI, Azure OpenAI, or a fully-local Ollama model.
 
 - **Zero runtime dependencies.** Pure Python standard library — including the AI calls (raw `urllib`, no vendor SDKs). Nothing to vet, nothing to pin, runs in locked-down and air-gapped environments.
+- **Environment-aware.** Detects WSL2, VirtualBox, VMware, KVM/QEMU, Hyper-V, Xen, containers, and cloud VMs, and interprets results accordingly — so normal NAT/virtualized behaviour (like a gateway that ignores ICMP) is no longer misreported as an outage.
+- **Cloud & enterprise topology.** Detects AWS/GCP/Azure instances, serverless/PaaS (Lambda, Cloud Run, App Engine, Azure Functions/App Service), Kubernetes, and Heroku (NIST SP 800-145 service models); flags risky IMDSv1 exposure; fingerprints WAF/CDN edge protection; audits SSH algorithm hygiene; and infers DMZ/bastion/multi-homed roles. Security findings are mapped to **NIST** publications.
 - **Cross-platform.** Linux, macOS, Windows. Python 3.8+.
 - **Fast.** Probes run in parallel; a full triage completes in a few seconds.
 - **Automation-friendly.** JSON output, JSON-lines audit log, webhook alerts, and meaningful exit codes.
+
+---
+
+## Environment awareness
+
+The most common cause of bogus network diagnostics is a tool that doesn't know it's running inside a VM or NAT. NetCheck detects its platform first (via `systemd-detect-virt`, DMI vendor strings, WSL kernel markers, container markers, and MAC OUIs) and adjusts its reasoning:
+
+- **Gateway checks don't rely on ICMP alone.** WSL2's gateway, VirtualBox's `10.0.2.2`, and many hardened/virtual routers silently drop ping. NetCheck falls back to the ARP/neighbour table and a TCP probe, and if the internet is reachable it concludes the gateway is forwarding — reporting *informational*, not a failure.
+- **NAT topology.** It compares your local address to your public egress IP to classify standard NAT, recognised hypervisor NAT (VirtualBox/WSL2), or **carrier-grade NAT** (`100.64.0.0/10`, which breaks inbound/port-forwarding).
+- **Proxy & VPN.** Detects `http(s)_proxy` environment proxies (which can re-sign TLS and explain odd certificate issuers) and active VPN/tunnel interfaces (which affect routing, DNS, and MTU).
+- **Captive-portal sanity.** In a VM/NAT where the connectivity probes are rewritten by the virtual network layer, NetCheck recognises that and won't cry "captive portal" when the internet plainly works.
+
+The result: running `netcheck` inside WSL2, VirtualBox, VMware, or a container gives the *real* diagnosis instead of a false "gateway down."
+
+---
+
+## Cloud & enterprise environments
+
+NetCheck understands modern deployment topologies, not just laptops and servers:
+
+- **Cloud instance & service model.** Detects AWS EC2/ECS/Fargate/Lambda, GCP GCE/Cloud Run/App Engine/Functions, Azure VM/App Service/Functions/Container Apps, Kubernetes, and Heroku — classified by **NIST SP 800-145** service model (IaaS / PaaS / SaaS / FaaS / CaaS). Detection uses serverless environment markers and the host's own instance-metadata service (link-local `169.254.169.254`), read-only.
+- **IMDS posture (SSRF).** On AWS, flags whether **IMDSv1** is reachable without a token — the classic metadata credential-theft vector — and recommends enforcing IMDSv2. Maps to NIST SP 800-53 SC-7 / AC-6.
+- **WAF / CDN fingerprint.** Passively identifies edge protection in front of a target (Cloudflare, Akamai, Imperva, AWS CloudFront/WAF, Azure Front Door, Fastly, F5 BIG-IP, Citrix, Sucuri, ModSecurity, …) from response headers and cookies.
+- **SSH algorithm hygiene.** Performs a read-only SSH version-exchange + KEXINIT handshake (no authentication) and flags weak key-exchange, host-key, cipher, and MAC algorithms (e.g. `diffie-hellman-group1-sha1`, `ssh-rsa`, `*-cbc`, `hmac-sha1`). Aligns with NISTIR 7966 and NIST SP 800-52 Rev. 2.
+- **Network role inference.** Flags multi-homed hosts (possible DMZ / bastion / router / gateway), VPN/tunnel endpoints, and cloud service roles.
+- **Bastion / DMZ / VPN / SSH paths.** Tunnel-interface and proxy detection, plus the gateway/NAT logic above, make diagnosis correct when traffic traverses jump hosts, VPNs, and segmented networks.
+
+### NIST alignment
+
+Security findings are tagged with the relevant NIST publication and surfaced in the report's **NIST mapping** line, so a `netcheck security` or `netcheck incident` run doubles as lightweight compliance evidence:
+
+| Area | NIST reference |
+|---|---|
+| TLS / cipher / certificate | SP 800-52 Rev. 2 |
+| Security headers | SP 800-53 SC-8 / OWASP |
+| Exposed services, segmentation, DMZ | SP 800-41 Rev. 1, SP 800-207 (Zero Trust) |
+| SSH hygiene | NISTIR 7966, SP 800-52 Rev. 2 |
+| Cloud IMDS / boundary protection | SP 800-53 SC-7, AC-6 |
+| Cloud service models | SP 800-145 |
+| Containers | SP 800-190 |
+
+NetCheck is an assessment aid, not a certification; it helps you spot gaps that map to these controls.
 
 ---
 
@@ -16,44 +60,37 @@ NetCheck runs the full network-troubleshooting workflow (interface → gateway �
 Most "network test" tools answer *what* (ping failed) but not *why*. NetCheck encodes the logic an experienced engineer applies — if the gateway is unreachable, that's the root cause and the ISP doesn't matter; if the internet works by IP but your resolver doesn't answer, your DNS is broken, not the internet; if small packets pass but 1500-byte packets don't, you have an MTU black hole — and states the cause and the fix in plain language. The optional AI layer then adds expert narrative on top of those structured findings.
 
 ---
+
 ## Install
 
 ```bash
-pip install netcheck-ir
-```
-
-For a command-line tool, `pipx` is cleaner — it installs into an isolated
-environment but still puts `netcheck` on your PATH:
-
-```bash
-pipx install netcheck-ir
-```
-
-No dependencies are pulled in — NetCheck is pure standard library. (TOML config
-files need Python 3.11+, or `pip install netcheck-ir[toml]`; JSON config works
-on any version.)
-
-<details>
-<summary>From source (for development)</summary>
-
-```bash
-git clone https://github.com/rsh1k/netcheck.git
+# from source
+git clone https://github.com/your-username/netcheck.git
 cd netcheck
-pip install -e .
-python3 -m unittest discover -s tests   # run the test suite
+pip install .
+
+# or run without installing
+python3 -m netcheck
 ```
-</details>
+
+TOML config files need Python 3.11+ (or `pip install netcheck-cli[toml]`); JSON config works on any version. Nothing else is required.
+
+---
 
 ## Quick start
 
 ```bash
-netcheck                            # full network triage + root-cause diagnosis
-netcheck -t api.example.com         # triage a specific host
-netcheck security -t example.com    # defensive security-posture assessment
-netcheck incident -t example.com    # diagnostics + security + host forensics
+netcheck                       # full network triage + root-cause diagnosis
+netcheck -t api.example.com    # triage against a specific host
+netcheck --full                # add traceroute, MTU black-hole, IPv6 checks
+netcheck security -t example.com   # defensive security-posture assessment
+netcheck incident -t example.com   # diagnostics + security + host forensics
 netcheck collect --evidence-dir ./ev   # read-only forensic evidence bundle
-netcheck --ai --ai-provider ollama  # add local AI analysis (no data leaves)
+netcheck verify ./ev/evidence-...      # verify an evidence bundle's integrity
 ```
+
+Add `--ai` to any run to layer on AI analysis (see below), `-o report.md` to save a report, and `--json` for machine-readable output.
+
 ---
 
 ## Modes
@@ -106,8 +143,11 @@ netcheck security -t example.com --ai --ai-provider openai
 - **Certificate hygiene** — validity, expiry window (warns < 30 days, fails < 15), issuer, hostname match, self-signed detection.
 - **HTTP security headers** — checks for HSTS, CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy (per OWASP Secure Headers).
 - **Exposed services** — reports reachable risky/management/database ports (Telnet, SMB, RDP, MySQL, Redis, MongoDB, …).
+- **WAF / CDN fingerprint** — identifies edge protection in front of the target.
+- **SSH algorithm audit** — read-only handshake flagging weak KEX/host-key/cipher/MAC algorithms (no authentication attempted).
+- **Cloud IMDS posture** — flags AWS IMDSv1 SSRF exposure on the host.
 
-These are configuration/hygiene checks only — **no exploitation, no credential testing, no network scanning** beyond the single specified target. It's blue-team auditing, comparable to what a CIS benchmark or OWASP review inspects.
+Every finding is tagged with its **NIST** reference. These are configuration/hygiene checks only — **no exploitation, no credential testing, no network scanning** beyond the single specified target. It's blue-team auditing, comparable to what a CIS benchmark or OWASP review inspects.
 
 ---
 
@@ -182,10 +222,12 @@ NetCheck's defaults touch only public infrastructure (Cloudflare/Google anycast 
 ```
 netcheck/
 ├── core.py        status model + low-level primitives (ping, TCP, DNS, HTTP, TLS)
+├── environment.py virtualization/NAT/proxy/VPN detection (WSL2, VBox, VMware, …)
+├── cloud.py       cloud/serverless detection (AWS/GCP/Azure, IMDS, Lambda/Cloud Run)
 ├── checks.py      layered diagnostic checks + runner
-├── security.py    defensive posture checks (TLS/cert/headers/exposed services)
+├── security.py    posture checks (TLS/cert/headers/exposed/WAF/SSH/IMDS) + NIST tags
 ├── forensics.py   read-only evidence collection + integrity verification
-├── diagnosis.py   rule-based root-cause engine
+├── diagnosis.py   environment-aware rule-based root-cause engine
 ├── ai.py          provider abstraction (Claude/OpenAI/Azure/Ollama) + redaction
 ├── config.py      config + secret handling
 ├── report.py      Markdown / JSON / audit-log renderers

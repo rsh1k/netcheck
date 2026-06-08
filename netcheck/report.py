@@ -72,6 +72,14 @@ def write_markdown(path, env, results, findings, ai_result=None, mode="triage"):
             detail = (r.detail or "").replace("|", "\\|")
             L.append(f"| `{r.status}` | {r.name} | {detail} | {r.duration_ms:.0f}ms |")
         L.append("")
+        if cat == "security":
+            refs = []
+            for r in rows:
+                ref = (r.data or {}).get("nist")
+                if ref and ref not in refs:
+                    refs.append(ref)
+            if refs:
+                L.append("**NIST mapping:** " + "; ".join(refs) + "\n")
 
     L.append("## Diagnosis (rule-based)\n")
     if not findings:

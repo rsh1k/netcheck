@@ -19,7 +19,11 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from netcheck import core, config, ai, diagnosis, forensics, report, security, notify
+from netcheck import environment as envmod
+from netcheck import cloud
+from netcheck import checks
 from netcheck.core import CheckResult, OK, WARN, FAIL, INFO, SKIP
+from unittest import mock
 
 
 # --------------------------------------------------------------------------- #
@@ -415,6 +419,243 @@ class TestSecurityLive(unittest.TestCase):
     def test_exposed_services_clean(self):
         r = security.check_exposed_services("cloudflare.com", timeout=2)
         self.assertEqual(r.category, "security")
+
+
+class TestEnvironment(unittest.TestCase):
+    def test_detect_returns_shape(self):
+        e = envmod.detect_environment()
+        for k in ("platform", "pretty", "family", "method", "virtual"):
+            self.assertIn(k, e)
+        self.assertIsInstance(e["virtual"], bool)
+
+    def test_private_and_cgnat(self):
+        for ip in ("10.1.2.3", "192.168.0.5", "172.20.1.1", "169.254.1.1"):
+            self.assertTrue(envmod.is_private(ip), ip)
+        self.assertFalse(envmod.is_private("8.8.8.8"))
+        self.assertTrue(envmod.is_cgnat("100.70.1.1"))
+        self.assertFalse(envmod.is_cgnat("192.168.1.1"))
+
+    def test_classify_nat_virtualbox(self):
+        out = envmod.classify_nat("10.0.2.15", None, "10.0.2.2", ["10.0.2.3"],
+                                  {"platform": "virtualbox"})
+        self.assertTrue(out["behind_nat"])
+        self.assertEqual(out["type"], "VirtualBox NAT")
+
+    def test_classify_nat_wsl(self):
+        out = envmod.classify_nat("172.31.65.93", None, "172.31.64.1", ["10.255.255.254"],
+                                  {"platform": "wsl2"})
+        self.assertEqual(out["type"], "WSL2 NAT")
+
+    def test_classify_nat_cgnat(self):
+        out = envmod.classify_nat("192.168.1.5", "100.66.3.4", "192.168.1.1", [], {})
+        self.assertIn("CGNAT", out["type"])
+
+    def test_classify_nat_standard_and_public(self):
+        std = envmod.classify_nat("192.168.1.5", "203.0.113.9", "192.168.1.1", [], {})
+        self.assertTrue(std["behind_nat"])
+        self.assertEqual(std["type"], "standard NAT")
+        pub = envmod.classify_nat("203.0.113.9", "203.0.113.9", "203.0.113.1", [], {})
+        self.assertFalse(pub["behind_nat"])
+
+    def test_neighbor_state_unknown(self):
+        self.assertIn(envmod.neighbor_state("203.0.113.250"),
+                      ("unknown", "unreachable", "reachable"))
+
+    def test_proxy_env_detection(self):
+        os.environ["HTTPS_PROXY"] = "http://proxy.local:8080"
+        try:
+            p = envmod.proxy_env()
+            self.assertIn("https_proxy", p)
+        finally:
+            os.environ.pop("HTTPS_PROXY")
+
+
+class TestGatewayLogic(unittest.TestCase):
+    """Lock in the fix: filtered ICMP must not be a FAIL when upstream works."""
+
+    def _env(self, plat="wsl2", gw="172.31.64.1"):
+        return {"gateway": gw, "virt": {"platform": plat, "pretty": "WSL2", "virtual": True}}
+
+    def test_filtered_icmp_but_upstream_ok_is_not_fail(self):
+        bad_ping = mock.Mock(return_value=core.PingStats(reachable=False, loss_pct=100.0))
+        with mock.patch.object(checks, "ping", bad_ping), \
+             mock.patch.object(checks.envmod, "neighbor_state", return_value="unknown"), \
+             mock.patch.object(checks, "tcp_connect", return_value=(False, None, "x")), \
+             mock.patch.object(checks, "_upstream_reachable", return_value=True):
+            r = checks.check_gateway(self._env())
+        self.assertEqual(r.status, INFO)
+        self.assertNotEqual(r.status, FAIL)
+
+    def test_arp_reachable_is_ok(self):
+        bad_ping = mock.Mock(return_value=core.PingStats(reachable=False, loss_pct=100.0))
+        with mock.patch.object(checks, "ping", bad_ping), \
+             mock.patch.object(checks.envmod, "neighbor_state", return_value="reachable"):
+            r = checks.check_gateway(self._env())
+        self.assertEqual(r.status, OK)
+        self.assertIn("layer-2", r.detail)
+
+    def test_truly_down_is_fail(self):
+        bad_ping = mock.Mock(return_value=core.PingStats(reachable=False, loss_pct=100.0))
+        with mock.patch.object(checks, "ping", bad_ping), \
+             mock.patch.object(checks.envmod, "neighbor_state", return_value="unreachable"), \
+             mock.patch.object(checks, "tcp_connect", return_value=(False, None, "x")), \
+             mock.patch.object(checks, "_upstream_reachable", return_value=False):
+            r = checks.check_gateway(self._env(plat="physical", gw="192.168.1.1"))
+        self.assertEqual(r.status, FAIL)
+
+    def test_no_gateway_but_upstream_ok(self):
+        with mock.patch.object(checks, "_upstream_reachable", return_value=True):
+            r = checks.check_gateway({"gateway": None, "virt": {"platform": "wsl2"}})
+        self.assertEqual(r.status, INFO)
+
+
+class TestDiagnosisEnvAware(unittest.TestCase):
+    def test_captive_reframed_in_vm(self):
+        rs = [
+            CheckResult("Internet (by IP)", OK, "", {"reachable": True}),
+            CheckResult("DNS resolution", OK, "", {}),
+            CheckResult("HTTP / captive portal", WARN, "", {"captive_portal": True}),
+        ]
+        env = {"virt": {"platform": "wsl2", "pretty": "WSL2", "virtual": True}}
+        f = diagnosis.diagnose(rs, "t", env)
+        titles = " ".join(x["title"] for x in f)
+        self.assertIn("virtual network layer", titles)
+
+    def test_captive_real_on_physical(self):
+        rs = [
+            CheckResult("Internet (by IP)", OK, "", {"reachable": True}),
+            CheckResult("HTTP / captive portal", WARN, "", {"captive_portal": True}),
+        ]
+        env = {"virt": {"platform": "physical", "pretty": "physical", "virtual": False}}
+        f = diagnosis.diagnose(rs, "t", env)
+        self.assertTrue(any("Captive portal is blocking" in x["title"] for x in f))
+
+
+class TestCloud(unittest.TestCase):
+    def test_serverless_env_cloud_run(self):
+        os.environ["K_SERVICE"] = "my-svc"
+        try:
+            c = cloud.detect_cloud(probe_imds=False)
+        finally:
+            os.environ.pop("K_SERVICE")
+        self.assertEqual(c["provider"], "gcp")
+        self.assertEqual(c["product"], "Google Cloud Run")
+        self.assertIn("PaaS", c["service_model"])
+
+    def test_serverless_env_lambda(self):
+        os.environ["AWS_LAMBDA_FUNCTION_NAME"] = "fn"
+        try:
+            c = cloud.detect_cloud(probe_imds=False)
+        finally:
+            os.environ.pop("AWS_LAMBDA_FUNCTION_NAME")
+        self.assertEqual(c["provider"], "aws")
+        self.assertIn("FaaS", c["service_model"])
+
+    def test_no_cloud_fast(self):
+        c = cloud.detect_cloud(probe_imds=False)
+        self.assertIsNone(c["provider"])
+
+    def test_imds_findings(self):
+        warn = security.check_imds({"provider": "aws", "imds": {"imdsv1_enabled": True}})
+        self.assertEqual(warn.status, WARN)
+        self.assertIn("IMDSv1", warn.detail)
+        ok = security.check_imds({"provider": "aws", "imds": {"imdsv2": True, "imdsv1_enabled": False}})
+        self.assertEqual(ok.status, OK)
+        skip = security.check_imds({"provider": None})
+        self.assertEqual(skip.status, SKIP)
+
+
+def _build_kexinit(kex, hostkey, enc, mac):
+    import struct
+    nls = [kex, hostkey, enc, enc, mac, mac, "none", "none", "", ""]
+    payload = b"\x14" + b"\x00" * 16
+    for s in nls:
+        b = s.encode()
+        payload += struct.pack(">I", len(b)) + b
+    payload += b"\x00" + struct.pack(">I", 0)  # first_kex_follows + reserved
+    pad = 8 - ((4 + 1 + len(payload)) % 8)
+    if pad < 4:
+        pad += 8
+    return struct.pack(">I", 1 + len(payload) + pad) + bytes([pad]) + payload + b"\x00" * pad
+
+
+class MockSSHServer(threading.Thread):
+    def __init__(self, packet, banner=b"SSH-2.0-OpenSSH_8.9p1\r\n"):
+        super().__init__(daemon=True)
+        self.packet, self.banner = packet, banner
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(1)
+        self.port = self.srv.getsockname()[1]
+
+    def run(self):
+        try:
+            conn, _ = self.srv.accept()
+            conn.sendall(self.banner)
+            conn.sendall(self.packet)
+            try:
+                conn.recv(256)
+            except Exception:
+                pass
+            conn.close()
+        except Exception:
+            pass
+        finally:
+            self.srv.close()
+
+
+class TestSSHAudit(unittest.TestCase):
+    def test_parses_and_flags_weak(self):
+        pkt = _build_kexinit(
+            kex="curve25519-sha256,diffie-hellman-group1-sha1",
+            hostkey="rsa-sha2-512,ssh-rsa",
+            enc="aes256-gcm@openssh.com,3des-cbc",
+            mac="hmac-sha2-256-etm@openssh.com,hmac-sha1")
+        srv = MockSSHServer(pkt)
+        srv.start()
+        info = security.ssh_audit("127.0.0.1", srv.port, timeout=4)
+        self.assertTrue(info["reachable"])
+        self.assertIn("OpenSSH_8.9p1", info["software"])
+        self.assertIn("curve25519-sha256", info["kex"])
+        joined = " ".join(info["weak"])
+        self.assertIn("ssh-rsa", joined)
+        self.assertIn("3des-cbc", joined)
+        self.assertIn("diffie-hellman-group1-sha1", joined)
+        self.assertIn("hmac-sha1", joined)
+
+    def test_check_ssh_warns_on_weak(self):
+        pkt = _build_kexinit("diffie-hellman-group1-sha1", "ssh-rsa", "3des-cbc", "hmac-md5")
+        srv = MockSSHServer(pkt)
+        srv.start()
+        r = security.check_ssh("127.0.0.1", srv.port, timeout=4)
+        self.assertEqual(r.status, WARN)
+        self.assertEqual(r.category, "security")
+
+    def test_ssh_closed_is_skip(self):
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+        r = security.check_ssh("127.0.0.1", port, timeout=2)
+        self.assertEqual(r.status, SKIP)
+
+
+class TestWAF(unittest.TestCase):
+    def test_cloudflare_signature(self):
+        fake = (200, "", "", {"cf-ray": "abc123", "server": "cloudflare"})
+        with mock.patch.object(security, "http_probe", return_value=fake):
+            info = security.detect_waf("example.com")
+        self.assertIn("Cloudflare", info["vendors"])
+
+    def test_no_waf(self):
+        fake = (200, "", "", {"server": "nginx"})
+        with mock.patch.object(security, "http_probe", return_value=fake):
+            info = security.detect_waf("example.com")
+        self.assertEqual(info["vendors"], [])
+
+    def test_imperva_via_cookie(self):
+        fake = (200, "", "", {"x-iinfo": "1-2-3", "set-cookie": "visid_incap_1=xyz"})
+        with mock.patch.object(security, "http_probe", return_value=fake):
+            info = security.detect_waf("example.com")
+        self.assertIn("Imperva Incapsula", info["vendors"])
 
 
 if __name__ == "__main__":

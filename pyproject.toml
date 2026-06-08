@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "netcheck-ir"
 dynamic = ["version"]
-description = "Enterprise network triage, security posture, and IR/forensics in one command - with optional AI analysis (Claude / OpenAI / Azure / Ollama)."
+description = "Enterprise network triage, security posture, and IR/forensics in one command - environment-aware (WSL2/VM/cloud), with optional AI analysis (Claude / OpenAI / Azure / Ollama)."
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["network", "diagnostics", "troubleshooting", "security", "incident-response",
-            "forensics", "dfir", "ai", "llm", "dns", "tls", "sysadmin", "devops", "cli"]
+            "forensics", "dfir", "ai", "llm", "dns", "tls", "ssh", "waf", "cloud", "nist",
+            "aws", "gcp", "azure", "wsl", "sysadmin", "devops", "cli"]
 authors = [{ name = "NetCheck contributors" }]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

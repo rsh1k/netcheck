@@ -13,6 +13,8 @@ import time
 from datetime import datetime, timezone
 
 from . import core
+from . import environment as envmod
+from . import cloud as cloudmod
 from .core import (CheckResult, OK, WARN, FAIL, INFO, SKIP,
                    ping, tcp_connect, dns_query_a, http_probe, tls_check,
                    is_private_or_bogus, OSNAME, run_cmd)
@@ -21,6 +23,7 @@ from .config import (AppConfig, INTERNET_ANCHORS, PUBLIC_RESOLVERS,
 
 
 def gather_env(cfg: AppConfig) -> dict:
+    virt = envmod.detect_environment()
     return {
         "hostname": socket.gethostname(),
         "os": f"{core.platform.system()} {core.platform.release()}",
@@ -31,8 +34,22 @@ def gather_env(cfg: AppConfig) -> dict:
         "dns_servers": core.get_configured_dns(),
         "target": cfg.target,
         "operator": cfg.operator,
+        "platform": virt["pretty"],
+        "virt": virt,
+        "cloud": cloudmod.detect_cloud(timeout=1.0),
+        "proxy": envmod.proxy_env(),
+        "tunnels": envmod.tunnel_interfaces(),
+        "mtu": envmod.primary_mtu(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _upstream_reachable(timeout=1.5):
+    for ip, _ in INTERNET_ANCHORS:
+        ok, _, _ = tcp_connect(ip, 443, timeout=timeout)
+        if ok:
+            return True
+    return False
 
 
 def check_interface(env: dict) -> CheckResult:
@@ -47,21 +64,156 @@ def check_interface(env: dict) -> CheckResult:
     return CheckResult("Local interface", OK, f"IPv4 {ip}", {"has_ip": True, "ip": ip})
 
 
+def check_environment(env: dict) -> CheckResult:
+    virt = env.get("virt", {})
+    plat = virt.get("platform", "unknown")
+    data = {"platform": plat, "family": virt.get("family"), "method": virt.get("method")}
+    detail = virt.get("pretty", plat)
+    if virt.get("method"):
+        detail += f"  (detected via {virt['method']})"
+    return CheckResult("Environment", INFO, detail, data)
+
+
+def check_cloud(env: dict) -> CheckResult:
+    c = env.get("cloud") or {}
+    prov = c.get("provider")
+    if not prov:
+        return CheckResult("Cloud platform", INFO,
+                           "no cloud instance detected (on-prem / local)", {"provider": None})
+    pretty = cloudmod.PRETTY_PROVIDER.get(prov, prov)
+    parts = [pretty]
+    if c.get("product"):
+        parts.append(c["product"])
+    if c.get("service_model"):
+        parts.append(c["service_model"])
+    if c.get("region"):
+        parts.append("region " + c["region"])
+    return CheckResult("Cloud platform", INFO, "  ·  ".join(parts), c)
+
+
+def check_role(env: dict) -> CheckResult:
+    """Heuristic network-role inference (multi-homed / edge / DMZ / bastion hints)."""
+    data = {}
+    n = 0
+    try:
+        if OSNAME == "Linux":
+            import os as _os
+            ifaces = [i for i in _os.listdir("/sys/class/net")
+                      if i != "lo" and not i.startswith(("veth", "docker", "br-"))]
+            n = len(ifaces)
+            data["interfaces"] = ifaces
+    except Exception:
+        pass
+    cloud = env.get("cloud") or {}
+    roles = []
+    if cloud.get("service_model"):
+        roles.append(f"{cloud.get('product', 'cloud')} [{cloud['service_model']}]")
+    if n >= 2:
+        roles.append(f"multi-homed ({n} interfaces) — possible DMZ/bastion/router/gateway role")
+    tunnels = env.get("tunnels") or []
+    if tunnels:
+        roles.append("VPN/tunnel endpoint")
+    if not roles:
+        return CheckResult("Network role", INFO, "single-homed host (no multi-homing detected)", data)
+    return CheckResult("Network role", INFO, "; ".join(roles), data)
+
+
 def check_gateway(env: dict) -> CheckResult:
     gw = env.get("gateway")
+    virt = env.get("virt", {})
+    plat = virt.get("platform", "")
+    natty = plat in ("wsl2", "virtualbox", "vmware", "kvm", "qemu", "hyperv", "docker", "lxc")
+
     if not gw:
-        return CheckResult("Gateway reachability", WARN, "Could not determine default gateway",
-                           {"gateway": None})
-    st = ping(gw, count=3)
+        # No default route found. If we still reach the internet, it's not fatal.
+        if _upstream_reachable():
+            return CheckResult("Gateway reachability", INFO,
+                               "no default gateway detected, but upstream is reachable "
+                               "(normal in some WSL2/container setups)",
+                               {"gateway": None, "upstream_ok": True})
+        return CheckResult("Gateway reachability", WARN,
+                           "could not determine a default gateway", {"gateway": None})
+
+    st = ping(gw, count=2)
     data = {"gateway": gw, "loss_pct": st.loss_pct, "rtt_avg_ms": st.rtt_avg_ms,
-            "reachable": st.reachable}
-    if not st.reachable:
-        return CheckResult("Gateway reachability", FAIL,
-                           f"Cannot reach gateway {gw} - local link/Wi-Fi/router problem", data)
-    if st.loss_pct and st.loss_pct > 0:
-        return CheckResult("Gateway reachability", WARN, f"{gw} reachable but {st.loss_pct:.0f}% loss", data)
-    return CheckResult("Gateway reachability", OK,
-                       f"{gw}  {st.rtt_avg_ms:.1f}ms" if st.rtt_avg_ms else f"{gw} reachable", data)
+            "icmp_reachable": st.reachable, "platform": plat}
+
+    if st.reachable and not (st.loss_pct and st.loss_pct >= 50):
+        if st.loss_pct and st.loss_pct > 0:
+            return CheckResult("Gateway reachability", WARN,
+                               f"{gw} reachable but {st.loss_pct:.0f}% loss", data)
+        return CheckResult("Gateway reachability", OK,
+                           f"{gw}  {st.rtt_avg_ms:.1f}ms" if st.rtt_avg_ms else f"{gw} reachable", data)
+
+    # ICMP failed/lossy. ICMP is commonly filtered (WSL2, VMs, NAT, hardened routers),
+    # so fall back to Layer-2 (ARP/neighbour) and TCP before concluding anything.
+    l2 = envmod.neighbor_state(gw)
+    data["l2_state"] = l2
+    if l2 == "reachable":
+        return CheckResult("Gateway reachability", OK,
+                           f"{gw} reachable at layer-2 (ARP resolved; ICMP filtered)", data)
+
+    for port in (80, 443, 53):
+        ok, _, _ = tcp_connect(gw, port, timeout=1.5)
+        if ok:
+            data["tcp_ok_port"] = port
+            return CheckResult("Gateway reachability", OK,
+                               f"{gw} answers on TCP/{port} (ICMP filtered)", data)
+
+    upstream = _upstream_reachable()
+    data["upstream_ok"] = upstream
+    if upstream:
+        why = (f"expected in {virt.get('pretty', plat)} - its NAT gateway does not answer probes"
+               if natty else
+               "the gateway is silent to ICMP/TCP but is forwarding your traffic")
+        return CheckResult("Gateway reachability", INFO,
+                           f"{gw} doesn't respond to probes, but the internet is reachable — {why}", data)
+
+    return CheckResult("Gateway reachability", FAIL,
+                       f"cannot reach gateway {gw} and no upstream connectivity - local link/router problem", data)
+
+
+def check_nat(cfg: AppConfig, env: dict) -> CheckResult:
+    if not _upstream_reachable():
+        return CheckResult("NAT / egress", SKIP, "no internet - skipping egress detection",
+                           {"checked": False})
+    egress, src = envmod.public_egress_ip(timeout=cfg.timeout + 2)
+    info = envmod.classify_nat(env.get("local_ip"), egress, env.get("gateway"),
+                               env.get("dns_servers"), env.get("virt", {}))
+    info["egress_source"] = src
+    if egress is None:
+        return CheckResult("NAT / egress", WARN,
+                           "internet works but public IP could not be determined (egress probes blocked?)", info)
+    if info["type"] == "carrier-grade NAT (CGNAT)":
+        return CheckResult("NAT / egress", WARN, f"public IP {egress} — {info['note']}", info)
+    label = info["type"] or "detected"
+    return CheckResult("NAT / egress", OK, f"public IP {egress}  ·  {label}", info)
+
+
+def check_proxy(env: dict) -> CheckResult:
+    proxies = env.get("proxy") or {}
+    active = {k: v for k, v in proxies.items() if k != "no_proxy"}
+    if not active:
+        return CheckResult("Proxy", INFO, "no HTTP(S) proxy configured in environment",
+                           {"proxy": {}})
+    desc = ", ".join(f"{k}={v}" for k, v in active.items())
+    return CheckResult("Proxy", WARN,
+                       f"proxy in use — can rewrite/intercept traffic & TLS: {desc}",
+                       {"proxy": proxies})
+
+
+def check_vpn(env: dict) -> CheckResult:
+    tunnels = env.get("tunnels") or []
+    if not tunnels:
+        return CheckResult("VPN / tunnels", INFO, "no VPN/tunnel interfaces detected",
+                           {"tunnels": []})
+    return CheckResult("VPN / tunnels", INFO,
+                       f"active tunnel interface(s): {', '.join(tunnels)} — may affect routing/DNS/MTU",
+                       {"tunnels": tunnels})
+
+
+def check_gateway_legacy(env: dict) -> CheckResult:  # retained for reference/tests
+    return check_gateway(env)
 
 
 def check_internet(cfg: AppConfig) -> CheckResult:
@@ -306,10 +458,16 @@ def run_diagnostics(cfg: AppConfig, env: dict, emit=None):
             emit(r)
         return r
 
+    step(check_environment, env)
+    step(check_cloud, env)
     step(check_interface, env)
     step(check_gateway, env)
     inet = step(check_internet, cfg)
+    step(check_nat, cfg, env)
     step(check_dns, cfg)
+    step(check_proxy, env)
+    step(check_vpn, env)
+    step(check_role, env)
     step(check_ports, cfg)
     step(check_http_captive, cfg)
     step(check_tls, cfg)
