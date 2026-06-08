@@ -16,37 +16,44 @@ NetCheck runs the full network-troubleshooting workflow (interface → gateway �
 Most "network test" tools answer *what* (ping failed) but not *why*. NetCheck encodes the logic an experienced engineer applies — if the gateway is unreachable, that's the root cause and the ISP doesn't matter; if the internet works by IP but your resolver doesn't answer, your DNS is broken, not the internet; if small packets pass but 1500-byte packets don't, you have an MTU black hole — and states the cause and the fix in plain language. The optional AI layer then adds expert narrative on top of those structured findings.
 
 ---
-
 ## Install
 
 ```bash
-# from source
-git clone https://github.com/your-username/netcheck.git
-cd netcheck
-pip install .
-
-# or run without installing
-python3 -m netcheck
+pip install netcheck-ir
 ```
 
-TOML config files need Python 3.11+ (or `pip install netcheck-cli[toml]`); JSON config works on any version. Nothing else is required.
+For a command-line tool, `pipx` is cleaner — it installs into an isolated
+environment but still puts `netcheck` on your PATH:
 
----
+```bash
+pipx install netcheck-ir
+```
+
+No dependencies are pulled in — NetCheck is pure standard library. (TOML config
+files need Python 3.11+, or `pip install netcheck-ir[toml]`; JSON config works
+on any version.)
+
+<details>
+<summary>From source (for development)</summary>
+
+```bash
+git clone https://github.com/rsh1k/netcheck.git
+cd netcheck
+pip install -e .
+python3 -m unittest discover -s tests   # run the test suite
+```
+</details>
 
 ## Quick start
 
 ```bash
-netcheck                       # full network triage + root-cause diagnosis
-netcheck -t api.example.com    # triage against a specific host
-netcheck --full                # add traceroute, MTU black-hole, IPv6 checks
-netcheck security -t example.com   # defensive security-posture assessment
-netcheck incident -t example.com   # diagnostics + security + host forensics
+netcheck                            # full network triage + root-cause diagnosis
+netcheck -t api.example.com         # triage a specific host
+netcheck security -t example.com    # defensive security-posture assessment
+netcheck incident -t example.com    # diagnostics + security + host forensics
 netcheck collect --evidence-dir ./ev   # read-only forensic evidence bundle
-netcheck verify ./ev/evidence-...      # verify an evidence bundle's integrity
+netcheck --ai --ai-provider ollama  # add local AI analysis (no data leaves)
 ```
-
-Add `--ai` to any run to layer on AI analysis (see below), `-o report.md` to save a report, and `--json` for machine-readable output.
-
 ---
 
 ## Modes

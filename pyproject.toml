@@ -1,3 +1,8 @@
+ grep '^name' pyproject.toml
+name = "netcheck-ir"
+
+┌──(rashik㉿rashik)-[~/netcheck]
+└─$ cat pyproject.toml
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -40,3 +45,5 @@ netcheck = "netcheck.cli:main"
 
 [tool.setuptools]
 packages = ["netcheck"]
+
+┌──(rashik㉿rashik)-[~/netcheck]
