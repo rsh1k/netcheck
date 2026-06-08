@@ -1,19 +1,15 @@
- grep '^name' pyproject.toml
-name = "netcheck-ir"
-
-┌──(rashik㉿rashik)-[~/netcheck]
-└─$ cat pyproject.toml
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "netcheck-ir"
-version = "2.0.0"
+version = "2.0.1"
 description = "Enterprise network triage, security posture, and IR/forensics in one command - with optional AI analysis (Claude / OpenAI / Azure / Ollama)."
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = ["network", "diagnostics", "troubleshooting", "security", "incident-response",
             "forensics", "dfir", "ai", "llm", "dns", "tls", "sysadmin", "devops", "cli"]
 authors = [{ name = "NetCheck contributors" }]
@@ -22,28 +18,23 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Topic :: System :: Networking :: Monitoring",
     "Topic :: System :: Systems Administration",
     "Topic :: Security",
 ]
-# Zero runtime dependencies - standard library only (AI calls use urllib, no SDKs).
 dependencies = []
 
 [project.optional-dependencies]
-# Only needed for TOML config files on Python < 3.11 (JSON config works everywhere).
 toml = ["tomli; python_version < '3.11'"]
 
 [project.urls]
-Homepage = "https://github.com/your-username/netcheck"
-Issues = "https://github.com/your-username/netcheck/issues"
+Homepage = "https://github.com/rsh1k/netcheck"
+Issues = "https://github.com/rsh1k/netcheck/issues"
 
 [project.scripts]
 netcheck = "netcheck.cli:main"
 
 [tool.setuptools]
 packages = ["netcheck"]
-
-┌──(rashik㉿rashik)-[~/netcheck]
